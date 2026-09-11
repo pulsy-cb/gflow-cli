@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse
 from gflow_cli import __version__
 from gflow_cli.cli_models import build_catalog
 from gflow_cli.config import get_settings
+from gflow_cli.errors import GFlowError
 from gflow_cli.server.jobs import job_manager
 from gflow_cli.server.models import (
     ImageGenerateRequest,
@@ -61,6 +62,17 @@ async def check_credits(
     """Inspect Veo credit balance and account status."""
     try:
         return await inspect_profile(profile)
+    except GFlowError as exc:
+        status_code = (
+            exc.status if 400 <= exc.status < 600 else status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+        detail_msg = f"{exc.title}: {exc.detail}"
+        if exc.remediation_hint:
+            detail_msg = f"{detail_msg} -> {exc.remediation_hint}"
+        raise HTTPException(
+            status_code=status_code,
+            detail=detail_msg,
+        ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

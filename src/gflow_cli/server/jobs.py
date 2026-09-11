@@ -31,6 +31,7 @@ from gflow_cli.data.queries import list_projects
 from gflow_cli.paths import image_output_path
 from gflow_cli.server.models import (
     BatchImageGenerateRequest,
+    BatchVideoGenerateRequest,
     ImageGenerateRequest,
     JobResponse,
     MediaItem,
@@ -241,6 +242,30 @@ class JobManager:
             return job
 
         asyncio.create_task(self._run_image_batch_job(job, req))
+        return job
+
+    async def submit_video_batch_job(self, req: BatchVideoGenerateRequest) -> JobResponse:
+        profile_name = _safe_resolve_profile(req.profile)
+        self.on_job_submitted(profile_name)
+
+        job_id = f"batch_vid_{uuid.uuid4().hex[:12]}"
+        now = time.time()
+        job = JobResponse(
+            job_id=job_id,
+            status="pending",
+            task_type="batch_video",
+            total=len(req.prompts),
+            completed=0,
+            created_at=now,
+            check_url=f"/v1/jobs/{job_id}",
+        )
+        self._jobs[job_id] = job
+
+        if req.wait:
+            await self._run_video_batch_job(job, req)
+            return job
+
+        asyncio.create_task(self._run_video_batch_job(job, req))
         return job
 
     async def _run_image_job(self, job: JobResponse, req: ImageGenerateRequest) -> None:
@@ -541,6 +566,123 @@ class JobManager:
                 logger.error("server.video_job.failed", job_id=job.job_id, error=str(exc))
         finally:
             self.on_job_finished(profile_name, immediate_close=False)
+
+    async def _run_video_batch_job(self, job: JobResponse, req: BatchVideoGenerateRequest) -> None:
+        settings = get_settings()
+        profile_name = _safe_resolve_profile(req.profile)
+        profile_dir = settings.profile_subdir(profile_name)
+        out_dir = settings.output_dir
+
+        try:
+            try:
+                video_mode = VideoMode(req.mode.lower()) if req.mode else VideoMode.T2V
+                video_model = VideoModel.from_cli(req.model) if req.model else None
+                video_aspect = (
+                    VideoAspect.from_cli(req.aspect) if req.aspect else VideoAspect.PORTRAIT
+                )
+
+                lock = self.get_profile_lock(profile_name)
+                async with lock:
+                    job.status = "processing"
+                    logger.info(
+                        "server.batch_video_job.started",
+                        job_id=job.job_id,
+                        profile=profile_name,
+                        total=len(req.prompts),
+                    )
+                    client = await self.get_or_create_client(profile_name, profile_dir, out_dir)
+                    try:
+                        project_id = req.project
+                        if not project_id:
+                            rows = list_projects(
+                                db_path=settings.resolved_db_path(),
+                                profile=profile_name,
+                                limit=1,
+                                offset=0,
+                            )
+                            if rows:
+                                project_id = rows[0].project_id
+                            else:
+                                proj = await client.create_project(title="gflow api video batch")
+                                project_id = proj.project_id
+
+                        data_items: list[MediaItem] = []
+                        failed_errors: list[str] = []
+
+                        for idx, prompt_text in enumerate(req.prompts, start=1):
+                            logger.info(
+                                "server.batch_video_job.prompt_start",
+                                job_id=job.job_id,
+                                index=idx,
+                                total=len(req.prompts),
+                                prompt=prompt_text[:60],
+                            )
+                            gen_req = GenerateVideoRequest(
+                                prompt=prompt_text,
+                                mode=video_mode,
+                                aspect=video_aspect,
+                                model=video_model,
+                                duration=req.duration,
+                                resolution=req.resolution,
+                                count=1,
+                            )
+                            try:
+                                video = await client.generate_video(
+                                    project_id=project_id, req=gen_req
+                                )
+                                if not video.status.succeeded or video.local_path is None:
+                                    err_msg = (
+                                        video.status.error_message or "Video generation failed"
+                                    )
+                                    raise RuntimeError(err_msg)
+
+                                data_items.append(
+                                    MediaItem(
+                                        url=f"/v1/files/{video.local_path.name}",
+                                        local_path=str(video.local_path),
+                                        media_name=video.status.media_id,
+                                        media_type="video",
+                                    )
+                                )
+                            except Exception as p_exc:
+                                logger.warning(
+                                    "server.batch_video_job.prompt_failed",
+                                    job_id=job.job_id,
+                                    index=idx,
+                                    error=str(p_exc),
+                                )
+                                failed_errors.append(f"Prompt #{idx} failed: {p_exc}")
+                                if not req.continue_on_error:
+                                    raise
+
+                            job.data = list(data_items)
+                            job.completed = idx
+
+                        if data_items:
+                            job.status = "succeeded"
+                            if failed_errors:
+                                job.error = "; ".join(failed_errors)
+                        else:
+                            job.status = "failed"
+                            job.error = "; ".join(failed_errors) or "All video prompts failed"
+
+                        job.completed_at = time.time()
+                        logger.info(
+                            "server.batch_video_job.succeeded",
+                            job_id=job.job_id,
+                            total=len(req.prompts),
+                            generated=len(data_items),
+                        )
+                    except Exception:
+                        await self.close_client(profile_name)
+                        raise
+            except Exception as exc:
+                job.status = "failed"
+                job.error = str(exc)
+                job.completed_at = time.time()
+                logger.error("server.batch_video_job.failed", job_id=job.job_id, error=str(exc))
+        finally:
+            self.on_job_finished(profile_name, immediate_close=True)
 
 
 job_manager = JobManager()

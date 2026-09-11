@@ -169,6 +169,48 @@ def test_image_batch_sync(client: TestClient) -> None:
         mock_run.assert_awaited_once()
 
 
+def test_video_batch_async(client: TestClient) -> None:
+    payload = {
+        "prompts": ["first video prompt", "second video prompt"],
+        "model": "omni-flash",
+        "aspect": "9:16",
+        "duration": 6,
+        "resolution": "720p",
+        "wait": False,
+    }
+    with patch.object(JobManager, "_run_video_batch_job", new=AsyncMock()):
+        res = client.post("/v1/videos/batches", json=payload)
+        assert res.status_code == 202
+        data = res.json()
+        assert data["job_id"].startswith("batch_vid_")
+        assert data["task_type"] == "batch_video"
+        assert data["total"] == 2
+        assert data["completed"] == 0
+        job_id = data["job_id"]
+
+        poll = client.get(f"/v1/jobs/{job_id}")
+        assert poll.status_code == 200
+        assert poll.json()["job_id"] == job_id
+        assert poll.json()["total"] == 2
+
+
+def test_video_batch_sync(client: TestClient) -> None:
+    payload = {
+        "prompts": ["first video", "second video"],
+        "model": "omni-flash",
+        "aspect": "16:9",
+        "wait": True,
+    }
+    with patch.object(JobManager, "_run_video_batch_job", new=AsyncMock()) as mock_run:
+        res = client.post("/v1/videos/batches", json=payload)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["job_id"].startswith("batch_vid_")
+        assert data["task_type"] == "batch_video"
+        assert data["total"] == 2
+        mock_run.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_queue_tracking_and_auto_close() -> None:
     mgr = JobManager()

@@ -14,6 +14,7 @@ from gflow_cli.errors import GFlowError
 from gflow_cli.server.jobs import job_manager
 from gflow_cli.server.models import (
     BatchImageGenerateRequest,
+    BatchVideoGenerateRequest,
     ImageGenerateRequest,
     JobResponse,
     VideoGenerateRequest,
@@ -37,6 +38,7 @@ async def root() -> dict[str, Any]:
             "image_generations": "/v1/images/generations",
             "image_batches": "/v1/images/batches",
             "video_generations": "/v1/videos/generations",
+            "video_batches": "/v1/videos/batches",
             "jobs": "/v1/jobs",
             "files": "/v1/files/{filename}",
             "browser_close": "/v1/browser/close",
@@ -159,6 +161,27 @@ async def generate_video(req: VideoGenerateRequest, response: Response) -> JobRe
     Defaults to `wait=false` (202 Accepted with pollable job ID).
     """
     job = await job_manager.submit_video_job(req)
+    if not req.wait and job.status in ("pending", "processing"):
+        response.status_code = status.HTTP_202_ACCEPTED
+    elif job.status == "failed":
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    return job
+
+
+@router.post(
+    "/v1/videos/batches",
+    summary="Generate Video Batch (Multiple Prompts)",
+    response_model=JobResponse,
+    tags=["Generation"],
+)
+@router.post("/api/v1/videos/batches", include_in_schema=False)
+async def generate_video_batch(req: BatchVideoGenerateRequest, response: Response) -> JobResponse:
+    """Generate a batch of videos from a list of prompts sequentially.
+
+    Maintains a single open browser session throughout the batch and closes Chrome
+    automatically once all videos are generated.
+    """
+    job = await job_manager.submit_video_batch_job(req)
     if not req.wait and job.status in ("pending", "processing"):
         response.status_code = status.HTTP_202_ACCEPTED
     elif job.status == "failed":

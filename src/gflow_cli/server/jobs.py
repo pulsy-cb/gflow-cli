@@ -10,6 +10,7 @@ from pathlib import Path
 
 import structlog
 
+from gflow_cli import profile_store
 from gflow_cli.api.client import FlowApiClient
 from gflow_cli.api.image import Aspect as ImageAspect
 from gflow_cli.api.image import GenerateImageRequest
@@ -66,7 +67,7 @@ class JobManager:
         self._profile_locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
 
-    def _get_profile_lock(self, profile: str) -> asyncio.Lock:
+    def get_profile_lock(self, profile: str) -> asyncio.Lock:
         if profile not in self._profile_locks:
             self._profile_locks[profile] = asyncio.Lock()
         return self._profile_locks[profile]
@@ -118,7 +119,7 @@ class JobManager:
 
     async def _run_image_job(self, job: JobResponse, req: ImageGenerateRequest) -> None:
         settings = get_settings()
-        profile_name = req.profile or settings.profile or "default"
+        profile_name = profile_store.resolve_profile(req.profile or settings.profile)
         profile_dir = settings.profile_subdir(profile_name)
         out_dir = settings.output_dir
         upload_dir = out_dir / "uploads"
@@ -143,7 +144,7 @@ class JobManager:
                 count=req.n,
             )
 
-            lock = self._get_profile_lock(profile_name)
+            lock = self.get_profile_lock(profile_name)
             async with lock:
                 job.status = "processing"
                 logger.info("server.image_job.started", job_id=job.job_id, profile=profile_name)
@@ -192,7 +193,7 @@ class JobManager:
 
     async def _run_video_job(self, job: JobResponse, req: VideoGenerateRequest) -> None:
         settings = get_settings()
-        profile_name = req.profile or settings.profile or "default"
+        profile_name = profile_store.resolve_profile(req.profile or settings.profile)
         profile_dir = settings.profile_subdir(profile_name)
         out_dir = settings.output_dir
         upload_dir = out_dir / "uploads"
@@ -232,7 +233,7 @@ class JobManager:
                 reference_images=ref_images,
             )
 
-            lock = self._get_profile_lock(profile_name)
+            lock = self.get_profile_lock(profile_name)
             async with lock:
                 job.status = "processing"
                 logger.info("server.video_job.started", job_id=job.job_id, profile=profile_name)

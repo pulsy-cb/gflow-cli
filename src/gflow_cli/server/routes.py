@@ -13,6 +13,7 @@ from gflow_cli.config import get_settings
 from gflow_cli.errors import GFlowError
 from gflow_cli.server.jobs import job_manager
 from gflow_cli.server.models import (
+    BatchImageGenerateRequest,
     ImageGenerateRequest,
     JobResponse,
     VideoGenerateRequest,
@@ -34,6 +35,7 @@ async def root() -> dict[str, Any]:
             "models": "/v1/models",
             "credits": "/v1/credits",
             "image_generations": "/v1/images/generations",
+            "image_batches": "/v1/images/batches",
             "video_generations": "/v1/videos/generations",
             "jobs": "/v1/jobs",
             "files": "/v1/files/{filename}",
@@ -115,6 +117,27 @@ async def generate_image(req: ImageGenerateRequest, response: Response) -> JobRe
     Set `wait=true` to block until completed, or `wait=false` for an asynchronous job ID.
     """
     job = await job_manager.submit_image_job(req)
+    if not req.wait and job.status in ("pending", "processing"):
+        response.status_code = status.HTTP_202_ACCEPTED
+    elif job.status == "failed":
+        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    return job
+
+
+@router.post(
+    "/v1/images/batches",
+    summary="Generate Image Batch (Multiple Prompts)",
+    response_model=JobResponse,
+    tags=["Generation"],
+)
+@router.post("/api/v1/images/batches", include_in_schema=False)
+async def generate_image_batch(req: BatchImageGenerateRequest, response: Response) -> JobResponse:
+    """Generate a batch of images from a list of prompts sequentially.
+
+    Maintains a single open browser session throughout the batch and closes Chrome
+    automatically once all prompts are generated.
+    """
+    job = await job_manager.submit_image_batch_job(req)
     if not req.wait and job.status in ("pending", "processing"):
         response.status_code = status.HTTP_202_ACCEPTED
     elif job.status == "failed":

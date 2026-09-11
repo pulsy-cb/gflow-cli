@@ -127,3 +127,77 @@ def test_get_job_not_found(client: TestClient) -> None:
 def test_download_file_not_found(client: TestClient) -> None:
     res = client.get("/v1/files/nonexistent.png")
     assert res.status_code == 404
+
+
+def test_image_batch_async(client: TestClient) -> None:
+    payload = {
+        "prompts": ["prompt 1", "prompt 2", "prompt 3"],
+        "model": "nano2",
+        "aspect": "9:16",
+        "wait": False,
+    }
+    with patch.object(JobManager, "_run_image_batch_job", new=AsyncMock()):
+        res = client.post("/v1/images/batches", json=payload)
+        assert res.status_code == 202
+        data = res.json()
+        assert data["job_id"].startswith("batch_")
+        assert data["task_type"] == "batch_image"
+        assert data["total"] == 3
+        assert data["completed"] == 0
+        job_id = data["job_id"]
+
+        poll = client.get(f"/v1/jobs/{job_id}")
+        assert poll.status_code == 200
+        assert poll.json()["job_id"] == job_id
+        assert poll.json()["total"] == 3
+
+
+def test_image_batch_sync(client: TestClient) -> None:
+    payload = {
+        "prompts": ["first prompt", "second prompt"],
+        "model": "nano2",
+        "aspect": "16:9",
+        "wait": True,
+    }
+    with patch.object(JobManager, "_run_image_batch_job", new=AsyncMock()) as mock_run:
+        res = client.post("/v1/images/batches", json=payload)
+        assert res.status_code == 200
+        data = res.json()
+        assert data["job_id"].startswith("batch_")
+        assert data["task_type"] == "batch_image"
+        assert data["total"] == 2
+        mock_run.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_queue_tracking_and_auto_close() -> None:
+    mgr = JobManager()
+    profile = "test_profile"
+
+    assert mgr.get_pending_count(profile) == 0
+
+    mgr.on_job_submitted(profile)
+    assert mgr.get_pending_count(profile) == 1
+
+    mgr.on_job_submitted(profile)
+    assert mgr.get_pending_count(profile) == 2
+
+    # First job finishes, 1 job remaining
+    mgr.on_job_finished(profile, immediate_close=False)
+    assert mgr.get_pending_count(profile) == 1
+    assert profile not in mgr._idle_timers
+
+    # Second job finishes, queue drained
+    mgr.on_job_finished(profile, immediate_close=False)
+    assert mgr.get_pending_count(profile) == 0
+    assert profile in mgr._idle_timers
+
+    # Cleanup timer
+    mgr.cancel_idle_teardown(profile)
+    assert profile not in mgr._idle_timers
+
+
+def test_close_browser_endpoint(client: TestClient) -> None:
+    res = client.post("/v1/browser/close")
+    assert res.status_code == 200
+    assert res.json()["status"] == "ok"

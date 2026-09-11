@@ -90,6 +90,31 @@ class VideoGenerateRequest(BaseModel):
     )
 
 
+class BatchImageGenerateRequest(BaseModel):
+    prompts: list[str] = Field(
+        ..., min_length=1, max_length=100, description="List of prompts to generate sequentially"
+    )
+    model: str = Field(
+        default="nano2", description="Model alias: 'nano2', 'nano-pro', 'nano2-lite', 'image4'"
+    )
+    aspect: str = Field(
+        default="9:16", description="Aspect ratio: '9:16', '16:9', '1:1', '4:3', '3:4'"
+    )
+    size: str | None = Field(
+        default=None, description="OpenAI size compatibility (e.g. '1024x1024', '1024x1792')"
+    )
+    n: int = Field(default=1, ge=1, le=4, description="Number of images per prompt (1-4)")
+    continue_on_error: bool = Field(
+        default=True, description="Continue generating subsequent prompts if one prompt fails"
+    )
+    project: str | None = Field(default=None, description="Existing Flow project ID")
+    profile: str | None = Field(default=None, description="Profile override")
+    wait: bool = Field(
+        default=False,
+        description="Wait for all prompts to complete (sync) or return job ID immediately (async)",
+    )
+
+
 class MediaItem(BaseModel):
     url: str = Field(..., description="URL endpoint to download or stream the generated file")
     local_path: str = Field(..., description="Absolute path of the generated file on disk")
@@ -108,7 +133,13 @@ class JobResponse(BaseModel):
     status: Literal["pending", "processing", "succeeded", "failed"] = Field(
         ..., description="Job execution status"
     )
-    task_type: Literal["image", "video"] = Field(..., description="Type of generation task")
+    task_type: Literal["image", "video", "batch_image"] = Field(
+        ..., description="Type of generation task"
+    )
+    total: int | None = Field(default=None, description="Total items in batch if applicable")
+    completed: int | None = Field(
+        default=None, description="Completed items in batch if applicable"
+    )
     created_at: float = Field(..., description="Unix timestamp of job creation")
     completed_at: float | None = Field(default=None, description="Unix timestamp of job completion")
     data: list[MediaItem] = Field(

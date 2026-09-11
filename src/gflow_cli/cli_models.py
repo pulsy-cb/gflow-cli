@@ -67,6 +67,7 @@ def build_catalog() -> dict[str, Any]:
             "aliases": [a for a in _VIDEO_CLI_MODELS if video_api.VideoModel.from_cli(a) is m],
             "ref_cap": video_api.reference_cap_for(m),  # applies to r2v
             "max_duration": video_api.max_duration_for(m),
+            "resolutions": ["360p", "720p"] if m is video_api.VideoModel.OMNI_FLASH else ["720p"],
         }
         for m in video_api.VideoModel
     ]
@@ -81,6 +82,7 @@ def build_catalog() -> dict[str, Any]:
         "video": {
             "models": video_models,
             "aspects": video_aspects,
+            "resolutions": ["360p", "720p"],
             "tiers": [t.value for t in video_api.Tier],
         },
     }

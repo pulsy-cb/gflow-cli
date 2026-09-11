@@ -17,7 +17,7 @@ from gflow_cli.server.models import (
     JobResponse,
     VideoGenerateRequest,
 )
-from gflow_cli.services.credits import inspect_profile
+from gflow_cli.services.credits import inspect_profile, inspect_profile_with_client
 
 router = APIRouter()
 
@@ -37,6 +37,7 @@ async def root() -> dict[str, Any]:
             "video_generations": "/v1/videos/generations",
             "jobs": "/v1/jobs",
             "files": "/v1/files/{filename}",
+            "browser_close": "/v1/browser/close",
         },
     }
 
@@ -64,6 +65,9 @@ async def check_credits(
     lock = job_manager.get_profile_lock(resolved_profile)
     async with lock:
         try:
+            active_client = job_manager.get_active_client(resolved_profile)
+            if active_client is not None:
+                return await inspect_profile_with_client(resolved_profile, active_client)
             return await inspect_profile(resolved_profile)
         except GFlowError as exc:
             status_code = (
@@ -83,6 +87,19 @@ async def check_credits(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to inspect credits: {exc}",
             ) from exc
+
+
+@router.post("/v1/browser/close", summary="Close Cached Browser Sessions", tags=["System"])
+async def close_browser(
+    profile: str | None = Query(None, description="Profile to close (or all profiles if omitted)"),
+) -> dict[str, str]:
+    """Close warm browser instance(s) and release profile locks immediately."""
+    if profile:
+        resolved = profile_store.resolve_profile(profile)
+        await job_manager.close_client(resolved)
+        return {"status": "ok", "message": f"Browser session for profile '{resolved}' closed"}
+    await job_manager.close_all_clients()
+    return {"status": "ok", "message": "All browser sessions closed"}
 
 
 @router.post(

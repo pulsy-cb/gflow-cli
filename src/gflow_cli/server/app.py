@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from gflow_cli import __version__
 from gflow_cli.config import get_settings
+from gflow_cli.server.jobs import job_manager
 from gflow_cli.server.routes import router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    yield
+    await job_manager.close_all_clients()
 
 
 def create_app() -> FastAPI:
@@ -23,6 +33,7 @@ def create_app() -> FastAPI:
         version=__version__,
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
 
     app.add_middleware(

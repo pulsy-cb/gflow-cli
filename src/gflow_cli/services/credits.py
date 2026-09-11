@@ -72,6 +72,16 @@ async def inspect_profile(profile: str | None) -> dict[str, Any]:
     return await _fetch(_profile_meta(resolved))
 
 
+async def inspect_profile_with_client(
+    profile: str | None,
+    client: FlowApiClient,
+) -> dict[str, Any]:
+    """Inspect credits using an already-active client instance."""
+    resolved = profile_store.resolve_profile(profile)
+    meta = _profile_meta(resolved)
+    return _success(meta, await client.get_credits())
+
+
 def _failure(meta: profile_store.ProfileMeta, exc: BaseException) -> dict[str, Any]:
     if isinstance(exc, GFlowError):
         error = exc.title

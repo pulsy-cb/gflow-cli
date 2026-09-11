@@ -67,11 +67,70 @@ class JobManager:
         self._jobs: dict[str, JobResponse] = {}
         self._profile_locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
+        self._active_clients: dict[str, FlowApiClient] = {}
+        self._idle_timers: dict[str, asyncio.TimerHandle] = {}
+        self._idle_timeout_seconds: float = 300.0
 
     def get_profile_lock(self, profile: str) -> asyncio.Lock:
         if profile not in self._profile_locks:
             self._profile_locks[profile] = asyncio.Lock()
         return self._profile_locks[profile]
+
+    def get_active_client(self, profile: str) -> FlowApiClient | None:
+        return self._active_clients.get(profile)
+
+    async def get_or_create_client(
+        self, profile_name: str, profile_dir: Path, out_dir: Path
+    ) -> FlowApiClient:
+        timer = self._idle_timers.pop(profile_name, None)
+        if timer:
+            timer.cancel()
+
+        client = self._active_clients.get(profile_name)
+        if client is not None:
+            try:
+                _ = client.page
+                return client
+            except RuntimeError:
+                self._active_clients.pop(profile_name, None)
+
+        client = FlowApiClient(profile_dir=profile_dir, out_dir=out_dir)
+        await client.__aenter__()
+        self._active_clients[profile_name] = client
+        return client
+
+    def schedule_idle_teardown(self, profile_name: str) -> None:
+        timer = self._idle_timers.pop(profile_name, None)
+        if timer:
+            timer.cancel()
+
+        try:
+            loop = asyncio.get_running_loop()
+            self._idle_timers[profile_name] = loop.call_later(
+                self._idle_timeout_seconds,
+                lambda: asyncio.create_task(self.close_client(profile_name)),
+            )
+        except RuntimeError:
+            pass
+
+    async def close_client(self, profile_name: str) -> None:
+        lock = self.get_profile_lock(profile_name)
+        async with lock:
+            timer = self._idle_timers.pop(profile_name, None)
+            if timer:
+                timer.cancel()
+            client = self._active_clients.pop(profile_name, None)
+            if client is not None:
+                logger.info("server.browser.close", profile=profile_name)
+                try:
+                    await client.__aexit__(None, None, None)
+                except Exception as exc:
+                    logger.warning("server.browser.close_error", error=str(exc))
+
+    async def close_all_clients(self) -> None:
+        """Close all cached browser sessions across all profiles."""
+        for profile_name in list(self._active_clients.keys()):
+            await self.close_client(profile_name)
 
     def get_job(self, job_id: str) -> JobResponse | None:
         return self._jobs.get(job_id)
@@ -149,10 +208,8 @@ class JobManager:
             async with lock:
                 job.status = "processing"
                 logger.info("server.image_job.started", job_id=job.job_id, profile=profile_name)
-                async with FlowApiClient(
-                    profile_dir=profile_dir,
-                    out_dir=out_dir,
-                ) as client:
+                client = await self.get_or_create_client(profile_name, profile_dir, out_dir)
+                try:
                     project_id = req.project
                     if not project_id:
                         rows = list_projects(
@@ -195,6 +252,10 @@ class JobManager:
                         job_id=job.job_id,
                         count=len(images),
                     )
+                    self.schedule_idle_teardown(profile_name)
+                except Exception:
+                    await self.close_client(profile_name)
+                    raise
         except Exception as exc:
             job.status = "failed"
             job.error = str(exc)
@@ -247,10 +308,8 @@ class JobManager:
             async with lock:
                 job.status = "processing"
                 logger.info("server.video_job.started", job_id=job.job_id, profile=profile_name)
-                async with FlowApiClient(
-                    profile_dir=profile_dir,
-                    out_dir=out_dir,
-                ) as client:
+                client = await self.get_or_create_client(profile_name, profile_dir, out_dir)
+                try:
                     project_id = req.project
                     if not project_id:
                         rows = list_projects(
@@ -282,6 +341,10 @@ class JobManager:
                     job.status = "succeeded"
                     job.completed_at = time.time()
                     logger.info("server.video_job.succeeded", job_id=job.job_id)
+                    self.schedule_idle_teardown(profile_name)
+                except Exception:
+                    await self.close_client(profile_name)
+                    raise
         except Exception as exc:
             job.status = "failed"
             job.error = str(exc)

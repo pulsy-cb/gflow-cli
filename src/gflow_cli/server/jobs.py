@@ -26,6 +26,7 @@ from gflow_cli.api.video import (
     Mode as VideoMode,
 )
 from gflow_cli.config import get_settings
+from gflow_cli.data.queries import list_projects
 from gflow_cli.paths import image_output_path
 from gflow_cli.server.models import (
     ImageGenerateRequest,
@@ -154,8 +155,17 @@ class JobManager:
                 ) as client:
                     project_id = req.project
                     if not project_id:
-                        proj = await client.create_project(title="gflow api images")
-                        project_id = proj.project_id
+                        rows = list_projects(
+                            db_path=settings.resolved_db_path(),
+                            profile=profile_name,
+                            limit=1,
+                            offset=0,
+                        )
+                        if rows:
+                            project_id = rows[0].project_id
+                        else:
+                            proj = await client.create_project(title="gflow api images")
+                            project_id = proj.project_id
 
                     if req.n == 1:
                         img = await client.generate_image(project_id=project_id, req=gen_req)
@@ -243,8 +253,17 @@ class JobManager:
                 ) as client:
                     project_id = req.project
                     if not project_id:
-                        proj = await client.create_project(title="gflow api videos")
-                        project_id = proj.project_id
+                        rows = list_projects(
+                            db_path=settings.resolved_db_path(),
+                            profile=profile_name,
+                            limit=1,
+                            offset=0,
+                        )
+                        if rows:
+                            project_id = rows[0].project_id
+                        else:
+                            proj = await client.create_project(title="gflow api videos")
+                            project_id = proj.project_id
 
                     video = await client.generate_video(project_id=project_id, req=gen_req)
 

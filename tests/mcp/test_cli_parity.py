@@ -94,6 +94,7 @@ _MCP_EXEMPT: dict[str, str] = {
     "mcp run": "the MCP server bootstrap itself",
     "mcp setup": "client-config generator for the MCP server itself",
     "serve": "HTTP/SSE service bootstrap",
+    "api": "HTTP REST API server bootstrap",
     "update": (
         "self-update of the running install — the manager would replace the venv "
         "under a live `gflow mcp run` and write its output onto the JSON-RPC stdout "

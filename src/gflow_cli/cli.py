@@ -680,5 +680,38 @@ def serve(port: int, host: str, profile: str | None, transport: str, no_spend: b
     main_http(host=host, port=port)
 
 
+@main.command("api")
+@click.option("--port", default=8006, help="Port to bind the REST API server to. [default: 8006]")
+@click.option("--host", default="127.0.0.1", help="Host to bind. [default: 127.0.0.1]")
+@click.option("--profile", default=None, help="Profile to use (overrides default).")
+def api(port: int, host: str, profile: str | None) -> None:
+    """Start the gflow REST API server (OpenAI-compatible endpoints, job tracking, Swagger UI).
+
+    \b
+    Endpoints:
+      • POST /v1/images/generations — Text-to-Image and Image-to-Image
+      • POST /v1/videos/generations — Text-to-Video and Image-to-Video
+      • GET  /v1/jobs/{job_id}      — Poll job execution status
+      • GET  /v1/models             — Enumerate image/video models & capabilities
+      • GET  /v1/credits            — Query Veo credit balance
+      • GET  /v1/files/{filename}   — Download or stream generated assets
+      • GET  /docs                  — Interactive Swagger UI documentation
+
+    \b
+    Example:
+      gflow api --port 8006
+      gflow api --port 8006 --profile pulsy26
+    """
+    console.print(
+        f"\n[bold]🚀 gflow REST API[/bold] starting on [cyan]http://{host}:{port}[/cyan]\n"
+        f"  Swagger UI: [cyan]http://{host}:{port}/docs[/cyan]\n"
+        f"  Models:     [cyan]http://{host}:{port}/v1/models[/cyan]\n"
+        f"  Credits:    [cyan]http://{host}:{port}/v1/credits[/cyan]\n"
+    )
+    from gflow_cli.server.app import run_server
+
+    run_server(host=host, port=port, default_profile=profile)
+
+
 if __name__ == "__main__":
     main()

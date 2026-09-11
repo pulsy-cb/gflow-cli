@@ -10,7 +10,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from gflow_cli.server.app import create_app
-from gflow_cli.server.jobs import JobManager, save_base64_media
+from gflow_cli.server.jobs import JobManager, resolve_media_path, save_base64_media
 from gflow_cli.server.models import (
     map_size_to_aspect,
 )
@@ -243,3 +243,67 @@ def test_close_browser_endpoint(client: TestClient) -> None:
     res = client.post("/v1/browser/close")
     assert res.status_code == 200
     assert res.json()["status"] == "ok"
+
+
+def test_video_generation_i2v_async(client: TestClient) -> None:
+    payload = {
+        "prompt": "the portrait starts smiling and looking around",
+        "initial_frame": "nonexistent_photo.png",
+        "mode": "i2v",
+        "model": "omni-flash",
+        "wait": False,
+    }
+    with patch.object(JobManager, "_run_video_job", new=AsyncMock()):
+        res = client.post("/v1/videos/generations", json=payload)
+        assert res.status_code == 202
+        data = res.json()
+        assert data["job_id"].startswith("vid_")
+        assert data["task_type"] == "video"
+
+
+def test_video_batch_i2v_async(client: TestClient) -> None:
+    payload = {
+        "items": [
+            {"prompt": "motion 1", "initial_frame": "frame1.png"},
+            {"prompt": "motion 2", "initial_frame": "frame2.png"},
+        ],
+        "model": "omni-flash",
+        "wait": False,
+    }
+    with patch.object(JobManager, "_run_video_batch_job", new=AsyncMock()):
+        res = client.post("/v1/videos/batches", json=payload)
+        assert res.status_code == 202
+        data = res.json()
+        assert data["job_id"].startswith("batch_vid_")
+        assert data["task_type"] == "batch_video"
+        assert data["total"] == 2
+
+
+def test_resolve_media_path(tmp_path: Path) -> None:
+    upload_dir = tmp_path / "uploads"
+    images_dir = tmp_path / "images"
+    images_dir.mkdir(parents=True)
+
+    img_file = images_dir / "sample.png"
+    img_file.write_bytes(b"dummy")
+
+    # 1. Direct path exists
+    path, ref_id = resolve_media_path(str(img_file), tmp_path, upload_dir)
+    assert path == img_file
+    assert ref_id is None
+
+    # 2. Filename resolved in images_dir
+    path, ref_id = resolve_media_path("sample.png", tmp_path, upload_dir)
+    assert path == img_file
+    assert ref_id is None
+
+    # 3. URL path /v1/files/sample.png
+    path, ref_id = resolve_media_path("/v1/files/sample.png", tmp_path, upload_dir)
+    assert path == img_file
+    assert ref_id is None
+
+    # 4. In-project Flow UUID format
+    uuid_str = "8b363a46-5320-4aaa-9f5d-6e97da73a596"
+    path, ref_id = resolve_media_path(uuid_str, tmp_path, upload_dir)
+    assert path is None
+    assert ref_id == uuid_str

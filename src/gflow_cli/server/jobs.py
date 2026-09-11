@@ -32,6 +32,7 @@ from gflow_cli.paths import image_output_path
 from gflow_cli.server.models import (
     BatchImageGenerateRequest,
     BatchVideoGenerateRequest,
+    BatchVideoItem,
     ImageGenerateRequest,
     JobResponse,
     MediaItem,
@@ -61,6 +62,80 @@ def save_base64_media(data_str: str, target_dir: Path) -> Path:
     path = target_dir / filename
     path.write_bytes(raw)
     return path
+
+
+def resolve_media_path(
+    source: str | None,
+    base_dir: Path,
+    upload_dir: Path,
+) -> tuple[Path | None, str | None]:
+    """Resolve an image source to (local_path, ref_uuid).
+
+    Supports:
+    - Base64 data URI or raw base64 string
+    - Local file path (absolute or relative)
+    - Output filename searched across base_dir, base_dir/images, base_dir/uploads
+    - REST API download path (e.g. /v1/files/foo.png -> foo.png)
+    - Flow media UUID string (36-char hyphenated UUID)
+    - HTTP / HTTPS URL
+    """
+    if not source:
+        return None, None
+    s = source.strip()
+    if not s:
+        return None, None
+
+    # Base64 string
+    if s.startswith("data:image/") or (
+        len(s) > 300 and ("=" in s or s.startswith(("/9j/", "iVBOR")))
+    ):
+        return save_base64_media(s, upload_dir), None
+
+    # Clean local file URL prefix
+    if s.startswith("file://"):
+        s = s[7:]
+
+    # Extract filename from local URL /v1/files/...
+    if "/v1/files/" in s or "/download/" in s:
+        s = s.split("/")[-1]
+
+    # HTTP / HTTPS URL download
+    if s.startswith("http://") or s.startswith("https://"):
+        import urllib.request
+
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        ext = Path(s.split("?")[0]).suffix or ".png"
+        target = upload_dir / f"download_{uuid.uuid4().hex[:8]}{ext}"
+        try:
+            req = urllib.request.Request(s, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                target.write_bytes(resp.read())
+            return target, None
+        except Exception as exc:
+            logger.warning("server.media.download_failed", url=s, error=str(exc))
+
+    # Direct local path
+    p = Path(s)
+    if p.is_file():
+        return p, None
+
+    # Search in common gflow output subdirectories
+    filename = p.name
+    candidates = [
+        base_dir / filename,
+        base_dir / "images" / filename,
+        base_dir / "uploads" / filename,
+        base_dir / "videos" / filename,
+    ]
+    for c in candidates:
+        if c.is_file():
+            return c, None
+
+    # If it looks like a Flow in-project asset UUID
+    if len(s) == 36 and s.count("-") == 4:
+        return None, s
+
+    return None, None
 
 
 def _safe_resolve_profile(req_profile: str | None) -> str:
@@ -248,13 +323,19 @@ class JobManager:
         profile_name = _safe_resolve_profile(req.profile)
         self.on_job_submitted(profile_name)
 
+        total_items = 0
+        if req.items:
+            total_items = len(req.items)
+        elif req.prompts:
+            total_items = len(req.prompts)
+
         job_id = f"batch_vid_{uuid.uuid4().hex[:12]}"
         now = time.time()
         job = JobResponse(
             job_id=job_id,
             status="pending",
             task_type="batch_video",
-            total=len(req.prompts),
+            total=total_items,
             completed=0,
             created_at=now,
             check_url=f"/v1/jobs/{job_id}",
@@ -483,25 +564,18 @@ class JobManager:
 
         try:
             try:
-                start_image_path: Path | None = None
-                if req.initial_frame:
-                    p = Path(req.initial_frame)
-                    if p.exists():
-                        start_image_path = p
-                elif req.image_base64:
-                    start_image_path = save_base64_media(req.image_base64, upload_dir)
+                start_path, start_ref_id = resolve_media_path(
+                    req.initial_frame or req.image_base64, out_dir, upload_dir
+                )
+                end_path, end_ref_id = resolve_media_path(req.end_frame, out_dir, upload_dir)
 
                 video_mode = VideoMode(req.mode.lower()) if req.mode else VideoMode.T2V
-                if start_image_path and video_mode == VideoMode.T2V:
+                if (start_path or start_ref_id) and video_mode == VideoMode.T2V:
                     video_mode = VideoMode.I2V
 
                 video_model = VideoModel.from_cli(req.model) if req.model else None
                 video_aspect = (
                     VideoAspect.from_cli(req.aspect) if req.aspect else VideoAspect.PORTRAIT
-                )
-
-                end_path = (
-                    Path(req.end_frame) if req.end_frame and Path(req.end_frame).exists() else None
                 )
 
                 ref_images = tuple(Path(p) for p in req.ref_paths) if req.ref_paths else ()
@@ -514,8 +588,10 @@ class JobManager:
                     duration=req.duration,
                     resolution=req.resolution,
                     count=req.n,
-                    start_image=start_image_path,
+                    start_image=start_path,
+                    start_image_ref_id=start_ref_id,
                     end_image=end_path,
+                    end_image_ref_id=end_ref_id,
                     reference_images=ref_images,
                 )
 
@@ -572,12 +648,25 @@ class JobManager:
         profile_name = _safe_resolve_profile(req.profile)
         profile_dir = settings.profile_subdir(profile_name)
         out_dir = settings.output_dir
+        upload_dir = out_dir / "uploads"
+
+        # Build list of items
+        items: list[BatchVideoItem] = []
+        if req.items:
+            items.extend(req.items)
+        elif req.prompts:
+            for idx, p_text in enumerate(req.prompts):
+                f_path = None
+                if req.initial_frames and idx < len(req.initial_frames):
+                    f_path = req.initial_frames[idx]
+                elif req.initial_frame or req.image_base64:
+                    f_path = req.initial_frame or req.image_base64
+                items.append(BatchVideoItem(prompt=p_text, initial_frame=f_path))
 
         try:
             try:
-                video_mode = VideoMode(req.mode.lower()) if req.mode else VideoMode.T2V
-                video_model = VideoModel.from_cli(req.model) if req.model else None
-                video_aspect = (
+                default_video_model = VideoModel.from_cli(req.model) if req.model else None
+                default_video_aspect = (
                     VideoAspect.from_cli(req.aspect) if req.aspect else VideoAspect.PORTRAIT
                 )
 
@@ -588,7 +677,7 @@ class JobManager:
                         "server.batch_video_job.started",
                         job_id=job.job_id,
                         profile=profile_name,
-                        total=len(req.prompts),
+                        total=len(items),
                     )
                     client = await self.get_or_create_client(profile_name, profile_dir, out_dir)
                     try:
@@ -609,22 +698,48 @@ class JobManager:
                         data_items: list[MediaItem] = []
                         failed_errors: list[str] = []
 
-                        for idx, prompt_text in enumerate(req.prompts, start=1):
+                        for idx, item in enumerate(items, start=1):
+                            start_path, start_ref_id = resolve_media_path(
+                                item.initial_frame or item.image_base64, out_dir, upload_dir
+                            )
+                            end_path, end_ref_id = resolve_media_path(
+                                item.end_frame, out_dir, upload_dir
+                            )
+
+                            mode_str = (item.mode or req.mode or "t2v").lower()
+                            v_mode = VideoMode(mode_str)
+                            if (start_path or start_ref_id) and v_mode == VideoMode.T2V:
+                                v_mode = VideoMode.I2V
+
+                            v_aspect = (
+                                VideoAspect.from_cli(item.aspect)
+                                if item.aspect
+                                else default_video_aspect
+                            )
+                            v_duration = item.duration or req.duration
+                            v_resolution = item.resolution or req.resolution
+
                             logger.info(
                                 "server.batch_video_job.prompt_start",
                                 job_id=job.job_id,
                                 index=idx,
-                                total=len(req.prompts),
-                                prompt=prompt_text[:60],
+                                total=len(items),
+                                mode=v_mode.value,
+                                prompt=item.prompt[:60],
                             )
+
                             gen_req = GenerateVideoRequest(
-                                prompt=prompt_text,
-                                mode=video_mode,
-                                aspect=video_aspect,
-                                model=video_model,
-                                duration=req.duration,
-                                resolution=req.resolution,
+                                prompt=item.prompt,
+                                mode=v_mode,
+                                aspect=v_aspect,
+                                model=default_video_model,
+                                duration=v_duration,
+                                resolution=v_resolution,
                                 count=1,
+                                start_image=start_path,
+                                start_image_ref_id=start_ref_id,
+                                end_image=end_path,
+                                end_image_ref_id=end_ref_id,
                             )
                             try:
                                 video = await client.generate_video(
@@ -651,7 +766,7 @@ class JobManager:
                                     index=idx,
                                     error=str(p_exc),
                                 )
-                                failed_errors.append(f"Prompt #{idx} failed: {p_exc}")
+                                failed_errors.append(f"Video #{idx} failed: {p_exc}")
                                 if not req.continue_on_error:
                                     raise
 
@@ -670,7 +785,7 @@ class JobManager:
                         logger.info(
                             "server.batch_video_job.succeeded",
                             job_id=job.job_id,
-                            total=len(req.prompts),
+                            total=len(items),
                             generated=len(data_items),
                         )
                     except Exception:

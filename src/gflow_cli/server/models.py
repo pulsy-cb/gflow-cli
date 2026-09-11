@@ -115,12 +115,37 @@ class BatchImageGenerateRequest(BaseModel):
     )
 
 
+class BatchVideoItem(BaseModel):
+    prompt: str = Field(..., description="Motion prompt describing the video")
+    initial_frame: str | None = Field(
+        default=None, description="Start image path, filename, URL, base64 or media UUID for I2V"
+    )
+    image_base64: str | None = Field(default=None, description="Base64 start image")
+    end_frame: str | None = Field(default=None, description="End frame path, filename or base64")
+    mode: str | None = Field(default=None, description="Mode: 't2v', 'i2v', or 'r2v'")
+    duration: int | None = Field(default=None, description="Duration in seconds")
+    aspect: str | None = Field(default=None, description="Aspect ratio override")
+    resolution: str | None = Field(default=None, description="Resolution override")
+
+
 class BatchVideoGenerateRequest(BaseModel):
-    prompts: list[str] = Field(
-        ...,
-        min_length=1,
-        max_length=50,
+    prompts: list[str] | None = Field(
+        default=None,
         description="List of motion prompts to generate in sequence",
+    )
+    initial_frames: list[str] | None = Field(
+        default=None,
+        description="List of start images (paths/filenames/URLs/base64) matching prompts for I2V",
+    )
+    initial_frame: str | None = Field(
+        default=None,
+        description="Single start image (path/URL/base64) shared across all prompts for I2V",
+    )
+    image_base64: str | None = Field(
+        default=None, description="Single base64 start image shared across all prompts for I2V"
+    )
+    items: list[BatchVideoItem] | None = Field(
+        default=None, description="List of video items with individual prompts and start frames"
     )
     model: str = Field(
         default="omni-flash",
